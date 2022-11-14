@@ -11,20 +11,14 @@
 
 #import "YYDispatchQueuePool.h"
 #import <UIKit/UIKit.h>
-#import <libkern/OSAtomic.h>
+#import <stdatomic.h>
 
 #define MAX_QUEUE_COUNT 32
-
-static inline dispatch_queue_priority_t NSQualityOfServiceToDispatchPriority(NSQualityOfService qos) {
-    switch (qos) {
-        case NSQualityOfServiceUserInteractive: return DISPATCH_QUEUE_PRIORITY_HIGH;
-        case NSQualityOfServiceUserInitiated: return DISPATCH_QUEUE_PRIORITY_HIGH;
-        case NSQualityOfServiceUtility: return DISPATCH_QUEUE_PRIORITY_LOW;
-        case NSQualityOfServiceBackground: return DISPATCH_QUEUE_PRIORITY_BACKGROUND;
-        case NSQualityOfServiceDefault: return DISPATCH_QUEUE_PRIORITY_DEFAULT;
-        default: return DISPATCH_QUEUE_PRIORITY_DEFAULT;
-    }
-}
+#define USER_INTERACTIVE_LABLE_NAME "com.ibireme.yykit.user-interactive"
+#define USER_INITIATED_LABEL_NAME  "com.ibireme.yykit.user-initiated"
+#define UTILITY_LABEL_NAME "com.ibireme.yykit.utility"
+#define BACKGROUND_LABEL_NAME "com.ibireme.yykit.background"
+#define DEFAULT_LABEL_NAME "com.ibireme.yykit.default"
 
 static inline qos_class_t NSQualityOfServiceToQOSClass(NSQualityOfService qos) {
     switch (qos) {
@@ -40,12 +34,12 @@ static inline qos_class_t NSQualityOfServiceToQOSClass(NSQualityOfService qos) {
 typedef struct {
     const char *name;
     void **queues;
-    uint32_t queueCount;
-    int32_t counter;
+    uint64_t queueCount;
+    atomic_uint_fast64_t counter;
 } YYDispatchContext;
 
 static YYDispatchContext *YYDispatchContextCreate(const char *name,
-                                                 uint32_t queueCount,
+                                                 uint64_t queueCount,
                                                  NSQualityOfService qos) {
     YYDispatchContext *context = calloc(1, sizeof(YYDispatchContext));
     if (!context) return NULL;
@@ -54,25 +48,17 @@ static YYDispatchContext *YYDispatchContextCreate(const char *name,
         free(context);
         return NULL;
     }
-    if ([UIDevice currentDevice].systemVersion.floatValue >= 8.0) {
-        dispatch_qos_class_t qosClass = NSQualityOfServiceToQOSClass(qos);
-        for (NSUInteger i = 0; i < queueCount; i++) {
-            dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, qosClass, 0);
-            dispatch_queue_t queue = dispatch_queue_create(name, attr);
-            context->queues[i] = (__bridge_retained void *)(queue);
-        }
-    } else {
-        long identifier = NSQualityOfServiceToDispatchPriority(qos);
-        for (NSUInteger i = 0; i < queueCount; i++) {
-            dispatch_queue_t queue = dispatch_queue_create(name, DISPATCH_QUEUE_SERIAL);
-            dispatch_set_target_queue(queue, dispatch_get_global_queue(identifier, 0));
-            context->queues[i] = (__bridge_retained void *)(queue);
-        }
+    dispatch_qos_class_t qosClass = NSQualityOfServiceToQOSClass(qos);
+    for (NSUInteger i = 0; i < queueCount; i++) {
+        dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, qosClass, 0);
+        dispatch_queue_t queue = dispatch_queue_create(name, attr);
+        context->queues[i] = (__bridge_retained void *)(queue);
     }
     context->queueCount = queueCount;
     if (name) {
          context->name = strdup(name);
     }
+    context->counter = ATOMIC_VAR_INIT(0);
     return context;
 }
 
@@ -93,12 +79,11 @@ static void YYDispatchContextRelease(YYDispatchContext *context) {
     free(context);
 }
 
-static dispatch_queue_t YYDispatchContextGetQueue(YYDispatchContext *context) {
-    uint32_t counter = (uint32_t)OSAtomicIncrement32(&context->counter);
+static dispatch_queue_t YYDispatchContextGetQueue(YYDispatchContext *context) {;
+    uint64_t counter = (uint64_t)atomic_fetch_add(&(context->counter), 1);
     void *queue = context->queues[counter % context->queueCount];
     return (__bridge dispatch_queue_t)(queue);
 }
-
 
 static YYDispatchContext *YYDispatchContextGetForQOS(NSQualityOfService qos) {
     static YYDispatchContext *context[5] = {0};
@@ -108,7 +93,7 @@ static YYDispatchContext *YYDispatchContextGetForQOS(NSQualityOfService qos) {
             dispatch_once(&onceToken, ^{
                 int count = (int)[NSProcessInfo processInfo].activeProcessorCount;
                 count = count < 1 ? 1 : count > MAX_QUEUE_COUNT ? MAX_QUEUE_COUNT : count;
-                context[0] = YYDispatchContextCreate("com.ibireme.yykit.user-interactive", count, qos);
+                context[0] = YYDispatchContextCreate(USER_INTERACTIVE_LABLE_NAME, count, qos);
             });
             return context[0];
         } break;
@@ -117,7 +102,7 @@ static YYDispatchContext *YYDispatchContextGetForQOS(NSQualityOfService qos) {
             dispatch_once(&onceToken, ^{
                 int count = (int)[NSProcessInfo processInfo].activeProcessorCount;
                 count = count < 1 ? 1 : count > MAX_QUEUE_COUNT ? MAX_QUEUE_COUNT : count;
-                context[1] = YYDispatchContextCreate("com.ibireme.yykit.user-initiated", count, qos);
+                context[1] = YYDispatchContextCreate(USER_INITIATED_LABEL_NAME, count, qos);
             });
             return context[1];
         } break;
@@ -126,7 +111,7 @@ static YYDispatchContext *YYDispatchContextGetForQOS(NSQualityOfService qos) {
             dispatch_once(&onceToken, ^{
                 int count = (int)[NSProcessInfo processInfo].activeProcessorCount;
                 count = count < 1 ? 1 : count > MAX_QUEUE_COUNT ? MAX_QUEUE_COUNT : count;
-                context[2] = YYDispatchContextCreate("com.ibireme.yykit.utility", count, qos);
+                context[2] = YYDispatchContextCreate(UTILITY_LABEL_NAME, count, qos);
             });
             return context[2];
         } break;
@@ -135,7 +120,7 @@ static YYDispatchContext *YYDispatchContextGetForQOS(NSQualityOfService qos) {
             dispatch_once(&onceToken, ^{
                 int count = (int)[NSProcessInfo processInfo].activeProcessorCount;
                 count = count < 1 ? 1 : count > MAX_QUEUE_COUNT ? MAX_QUEUE_COUNT : count;
-                context[3] = YYDispatchContextCreate("com.ibireme.yykit.background", count, qos);
+                context[3] = YYDispatchContextCreate(BACKGROUND_LABEL_NAME, count, qos);
             });
             return context[3];
         } break;
@@ -145,7 +130,7 @@ static YYDispatchContext *YYDispatchContextGetForQOS(NSQualityOfService qos) {
             dispatch_once(&onceToken, ^{
                 int count = (int)[NSProcessInfo processInfo].activeProcessorCount;
                 count = count < 1 ? 1 : count > MAX_QUEUE_COUNT ? MAX_QUEUE_COUNT : count;
-                context[4] = YYDispatchContextCreate("com.ibireme.yykit.default", count, qos);
+                context[4] = YYDispatchContextCreate(DEFAULT_LABEL_NAME, count, qos);
             });
             return context[4];
         } break;
@@ -176,7 +161,7 @@ static YYDispatchContext *YYDispatchContextGetForQOS(NSQualityOfService qos) {
 - (instancetype)initWithName:(NSString *)name queueCount:(NSUInteger)queueCount qos:(NSQualityOfService)qos {
     if (queueCount == 0 || queueCount > MAX_QUEUE_COUNT) return nil;
     self = [super init];
-    _context = YYDispatchContextCreate(name.UTF8String, (uint32_t)queueCount, qos);
+    _context = YYDispatchContextCreate(name.UTF8String, (uint64_t)queueCount, qos);
     if (!_context) return nil;
     _name = name;
     return self;
