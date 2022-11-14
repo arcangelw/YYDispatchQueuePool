@@ -49,7 +49,7 @@ NS_ASSUME_NONNULL_BEGIN
 @end
 
 /// Get a serial queue from global queue pool with a specified qos.
-extern dispatch_queue_t YYDispatchQueueGetForQOS(NSQualityOfService qos);
+FOUNDATION_EXTERN dispatch_queue_t YYDispatchQueueGetForQOS(NSQualityOfService qos);
 
 NS_ASSUME_NONNULL_END
 
